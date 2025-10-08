@@ -1,0 +1,49 @@
+# Dependencies
+node_modules/
+package-lock.json
+yarn.lock
+
+# Build artifacts
+artifacts/
+cache/
+out/
+build/
+dist/
+typechain/
+typechain-types/
+
+# Hardhat
+.hardhat/
+coverage/
+coverage.json
+*.log
+
+# Foundry
+lib/
+broadcast/
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*.sublime-*
+
+# OS
+.DS_Store
+Thumbs.db
+*.swp
+
+# Testing
+.cache/
+*.coverage
+.nyc_output/
+
+# Misc
+*.tgz
+*.tsbuildinfo
