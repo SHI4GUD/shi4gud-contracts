@@ -61,8 +61,12 @@ contract Ktv2 is Ownable {
     mapping(address => uint16) public addVotes;
     // existingOC => vote count
     mapping(address => uint16) public removeVotes;
-    // voter => target => voted
-    mapping(address => mapping(address => bool)) public hasVoted;
+    // voter => target => voted for add
+    mapping(address => mapping(address => bool)) public hasVotedAdd;
+    // voter => target => voted for remove
+    mapping(address => mapping(address => bool)) public hasVotedRemove;
+    mapping(address => uint) public pastOcFees;
+    mapping(address => uint) public lastStartBlock;
 
     // OC Management Events
     event VotedToAdd(address indexed voter, address indexed newOC, string data);
@@ -99,11 +103,12 @@ contract Ktv2 is Ownable {
     /** -----------------------------------------------------------------------
      * 
      */
-    function rwd(address payable _to, uint _amt) external onlyOC notDeclined(_to) epochComplete {
+    function rwd(address payable _to, uint _amt) external onlyOC notDeclined(_to) epochComplete migrateFees {
         require(blockRwd[startBlock][_to] >= consensusReq, "No consensus");
 
+        uint fee = recordOCFee();
+        uint _rwd = _amt > fee ? _amt - fee : 0;
         startBlock = startBlock + epochInterval;
-        uint _rwd = _amt - recordOCFee();
 
         if(_rwd > P_DEN) {
             (bool sent, ) = _to.call{value: _rwd}("");
@@ -113,10 +118,11 @@ contract Ktv2 is Ownable {
         emit Rwd(_to, _rwd);
     }
 
+
     /** -----------------------------------------------------------------------
      *
      */
-    function vote(address payable _to, string calldata data) external onlyOC notDeclined(_to) epochComplete {
+    function vote(address payable _to, string calldata data) external onlyOC notDeclined(_to) epochComplete migrateFees {
         require(ocRwdrVote[msg.sender][startBlock] == address(0), "Already voted");
 
         blockRwd[startBlock][_to]++;
@@ -130,13 +136,15 @@ contract Ktv2 is Ownable {
     /** -----------------------------------------------------------------------
      *
      */
-    function resetVote(address _to) external onlyOC notDeclined(_to) epochComplete {
+    function resetVote(address _to) external onlyOC notDeclined(_to) epochComplete migrateFees {
         require(blockRwd[startBlock][_to] > 0, "Invalid dest");
         require(ocRwdrVote[msg.sender][startBlock] != address(0), "Vote missing");
 
         blockRwd[startBlock][_to]--;
         ocRwdrVote[msg.sender][startBlock] = address(0);
         resetOCFee();
+
+        emit Voted(startBlock, _to, "rst");
     }
 
     /** -----------------------------------------------------------------------
@@ -151,35 +159,50 @@ contract Ktv2 is Ownable {
      * 
      */
     function recordOCFee() private returns (uint) {
-        
-        if(address(this).balance > tlOcFees) {
-            uint amt = (((address(this).balance - tlOcFees) * ocFee) / P_DEN);
-            ocFees[msg.sender][startBlock] += amt;
-            tlOcFees += amt;
+        uint incrAmt = 0;
+        if (address(this).balance > tlOcFees) {
+            incrAmt = ((address(this).balance - tlOcFees) * ocFee) / P_DEN;
+            ocFees[msg.sender][startBlock] += incrAmt;
+            tlOcFees += incrAmt;
         }
-        
-        return tlOcFees;
+        return incrAmt;
     }
 
     /** -----------------------------------------------------------------------
      *
      */
-    function withdrawOCFee(uint32[] calldata blocks) external {
-
-        uint amt;
-        for(uint i = 0; i < blocks.length; i++) {
-            if(blocks[i] >= startBlock) continue;
-            uint epochFee = ocFees[msg.sender][blocks[i]];
-            tlOcFees -= epochFee;
-            ocFees[msg.sender][blocks[i]] = 0;
-
-            amt += epochFee;
+    function withdrawOCFee() external migrateFees {
+        uint amt = pastOcFees[msg.sender];
+        if (block.number > startBlock + epochInterval) {  // Epoch complete
+            uint currentFee = ocFees[msg.sender][startBlock];
+            if (currentFee > 0) {
+                amt += currentFee;
+                ocFees[msg.sender][startBlock] = 0;
+            }
         }
 
-        if(address(this).balance >= amt) {
+        pastOcFees[msg.sender] = 0;
+        tlOcFees -= amt;
+        if (address(this).balance >= amt) {
             (bool sent, ) = msg.sender.call{value: amt}("");
             require(sent, "Failed");
         }
+    }
+
+    /** -----------------------------------------------------------------------
+     *
+     */
+    modifier migrateFees() {
+        if (lastStartBlock[msg.sender] != startBlock && lastStartBlock[msg.sender] != 0) {
+            uint oldBlock = lastStartBlock[msg.sender];
+            uint oldFee = ocFees[msg.sender][oldBlock];
+            if (oldFee > 0 && oldBlock < startBlock) {
+                pastOcFees[msg.sender] += oldFee;
+                ocFees[msg.sender][oldBlock] = 0;  // Clean up
+            }
+        }
+        lastStartBlock[msg.sender] = startBlock;
+        _;
     }
 
     /** -----------------------------------------------------------------------
@@ -234,6 +257,9 @@ contract Ktv2 is Ownable {
     function addOCRwdr(address addr) public onlyOwner {
         require(!ocRwdrs[addr], 'Already set');
         ocRwdrs[addr] = true;
+        totalOC++;
+        consensusReq = (totalOC + 1) / 2;
+        emit NodeAdded(addr);
     }
 
     /** -----------------------------------------------------------------------
@@ -241,7 +267,12 @@ contract Ktv2 is Ownable {
      */
     function removeOCRwdr(address addr) public onlyOwner {
         require(ocRwdrs[addr], 'Already removed');
-        ocRwdrs[addr] = false;
+        if (totalOC > 1) {
+            ocRwdrs[addr] = false;
+            totalOC--;
+            consensusReq = (totalOC + 1) / 2;
+            emit NodeRemoved(addr);
+        }
     }
 
     /** -----------------------------------------------------------------------
@@ -255,7 +286,7 @@ contract Ktv2 is Ownable {
      *
      */
     function setMaxBurnPrc(uint16 amt) public onlyOwner {
-        require(amt < 50 * P_FCTR);
+        require(amt < 50 * P_FCTR, "Max burn prc >= 50%");
         maxBrnPrc = amt;
     }
 
@@ -263,7 +294,7 @@ contract Ktv2 is Ownable {
      *
      */
     function setBurnFactor(uint16 amt) public onlyOwner {
-        require(amt < 50 * P_FCTR);
+        require(amt < 50 * P_FCTR, "Burn factor >= 50%");
         burnFactor = amt;
     }
 
@@ -271,7 +302,7 @@ contract Ktv2 is Ownable {
      *
      */
     function setDonationPrc(uint16 amt) public onlyOwner {
-        require(amt <= 100 * P_FCTR);
+        require(amt <= 100 * P_FCTR, "Donation prc > 100%");
         donationPrc = amt;
     }
 
@@ -279,7 +310,7 @@ contract Ktv2 is Ownable {
      *
      */
     function setV2(bool _v2) public onlyOwner {
-        require(v2 != _v2);
+        require(v2 != _v2, "Same value");
         v2 = _v2;
     }
 
@@ -323,10 +354,10 @@ contract Ktv2 is Ownable {
      *
      */
     function voteToAdd(address newOC, string calldata data) external onlyOC {
-        require(!hasVoted[msg.sender][newOC], "Already voted for this add");
+        require(!hasVotedAdd[msg.sender][newOC], "Already voted for this add");
         require(!ocRwdrs[newOC], "Already an OC node");
         addVotes[newOC]++;
-        hasVoted[msg.sender][newOC] = true;
+        hasVotedAdd[msg.sender][newOC] = true;
         emit VotedToAdd(msg.sender, newOC, data);
         
         uint16 required = (totalOC + 1) / 2;
@@ -339,13 +370,13 @@ contract Ktv2 is Ownable {
     }
 
     /** -----------------------------------------------------------------------
-     *
+     * 
      */
     function voteToRemove(address existingOC, string calldata data) external onlyOC {
-        require(!hasVoted[msg.sender][existingOC], "Already voted for this remove");
+        require(!hasVotedRemove[msg.sender][existingOC], "Already voted for this remove");
         require(ocRwdrs[existingOC], "Not an OC node");
         removeVotes[existingOC]++;
-        hasVoted[msg.sender][existingOC] = true;
+        hasVotedRemove[msg.sender][existingOC] = true;
         emit VotedToRemove(msg.sender, existingOC, data);
         
         uint16 required = (totalOC + 1) / 2;
@@ -361,18 +392,18 @@ contract Ktv2 is Ownable {
      *
      */
     function resetVoteToAdd(address newOC) external onlyOC {
-        require(hasVoted[msg.sender][newOC], "No add vote to reset for this target");
+        require(hasVotedAdd[msg.sender][newOC], "No add vote to reset for this target");
         addVotes[newOC]--;
-        hasVoted[msg.sender][newOC] = false;
+        hasVotedAdd[msg.sender][newOC] = false;
     }
 
     /** -----------------------------------------------------------------------
      *
      */
     function resetVoteToRemove(address existingOC) external onlyOC {
-        require(hasVoted[msg.sender][existingOC], "No remove vote to reset for this target");
+        require(hasVotedRemove[msg.sender][existingOC], "No remove vote to reset for this target");
         removeVotes[existingOC]--;
-        hasVoted[msg.sender][existingOC] = false;
+        hasVotedRemove[msg.sender][existingOC] = false;
     }
 
     /** -----------------------------------------------------------------------
