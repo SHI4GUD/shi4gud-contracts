@@ -48,6 +48,13 @@ Factory contract for deploying new Ktv2 instances with custom parameters.
 ### TokenPrice.sol (Solidity 0.7.6)
 Price oracle supporting both Uniswap V2 and V3 pools.
 
+### Ktv2OwnershipTimelock.sol (Solidity 0.8.20)
+Timelock mechanism for temporarily freezing Ktv2 contract ownership:
+- Configurable freeze duration (1 hour to 365 days)
+- Owner registration and verification
+- Automatic ownership restoration after unlock period
+- Freeze extension capability
+
 ## Key Features
 
 - **Consensus Governance** - Multiple OC nodes must agree on all reward distributions
